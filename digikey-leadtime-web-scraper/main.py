@@ -41,7 +41,7 @@ class DigikeyLeadTimeScraper:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     ]
     
-    def __init__(self, headless: bool = False, timeout: int = 60):
+    def __init__(self, headless: bool = False, timeout: int = 15):
         self.headless = headless
         self.timeout = timeout
         self.driver = None
@@ -90,7 +90,7 @@ class DigikeyLeadTimeScraper:
             logger.info("🍪 Looking for cookie banner...")
             
             # Wait a bit for banner to appear
-            time.sleep(2)
+            time.sleep(0.5) 
             
             # Multiple selectors for cookie accept buttons
             cookie_selectors = [
@@ -126,8 +126,7 @@ class DigikeyLeadTimeScraper:
             return True  # Continue anyway
     
     
-    def human_delay(self, min_sec: float = 2, max_sec: float = 5):
-        """Random delay"""
+    def human_delay(self, min_sec: float = 0.5, max_sec: float = 1.5):
         time.sleep(random.uniform(min_sec, max_sec))
     
     def scroll_to(self, element):
@@ -344,7 +343,7 @@ class DigikeyLeadTimeScraper:
             
             # Wait for modal to fully load
             logger.info("⏳ Waiting for modal to appear...")
-            self.human_delay(7, 10)
+            self.human_delay(0.1, 0.3)
             
             # EXACT selector from HTML!
             selectors = [
@@ -739,7 +738,7 @@ class DigikeyLeadTimeScraper:
 
 
 def main():
-    """Main execution"""
+    """Main execution with summary table"""
     
     test_parts = [
         "AD5412AREZ",
@@ -748,30 +747,71 @@ def main():
     ]
     
     print("\n🚀 Starting Digikey Lead Time Scraper")
+    start_time = time.time()
     print(f"📅 Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    for part_number in test_parts:
-        scraper = None
-        try:
-            scraper = DigikeyLeadTimeScraper(headless=False, timeout=60)
-            scraper.setup_driver()
+    scraper = None
+    results = []  # ✅ Store all results
+    
+    try:
+        scraper = DigikeyLeadTimeScraper(headless=False)
+        scraper.setup_driver()
+        
+        for idx, part_number in enumerate(test_parts):
             result = scraper.scrape_part(part_number)
+            results.append(result)  # ✅ Save result
             scraper.print_results(result)
             
-            if test_parts.index(part_number) < len(test_parts) - 1:
-                delay = random.uniform(10, 20)
-                logger.info(f"⏳ Waiting {delay:.1f}s...")
-                time.sleep(delay)
-                
-        except DigikeyScraperError as e:
-            logger.error(f"❌ Scraper error: {str(e)}")
-        except Exception as e:
-            logger.error(f"❌ Unexpected error: {str(e)}")
-        finally:
-            if scraper:
-                scraper.close()
+            if idx < len(test_parts) - 1:
+                time.sleep(1)
+    finally:
+        if scraper:
+            scraper.close()
     
+    # ✅ SUMMARY TABLE
+    elapsed = time.time() - start_time
+    successful = sum(1 for r in results if r['success'])
+    failed = len(results) - successful
+    
+    print("\n" + "="*70)
+    print("📊 EXECUTION SUMMARY")
+    print("="*70)
     print(f"✅ Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"⏱️  Total time: {elapsed:.1f}s ({elapsed/60:.1f} minutes)")
+    print(f"📈 Average per part: {elapsed/len(test_parts):.1f}s")
+    print(f"✅ Successful: {successful}/{len(test_parts)}")
+    print(f"❌ Failed: {failed}/{len(test_parts)}")
+    print("="*70 + "\n")
+    
+    # ✅ RESULTS TABLE
+    print("📋 DETAILED RESULTS TABLE")
+    print("="*70)
+    print(f"{'Part Number':<20} | {'Status':<10} | {'Stock':<8} | {'Lead Times':<12}")
+    print("-"*70)
+    
+    for result in results:
+        status = "✅ SUCCESS" if result['success'] else "❌ FAILED"
+        stock = f"{result['current_quantity']:,}" if result['current_quantity'] > 0 else "Out"
+        lead_count = len(result['lead_times']) if result['lead_times'] else 0
+        
+        print(f"{result['part_number']:<20} | {status:<10} | {stock:<8} | {lead_count} entries")
+    
+    print("="*70 + "\n")
+    
+    # ✅ LEAD TIMES SUMMARY
+    print("📦 LEAD TIME SUMMARY")
+    print("="*70)
+    
+    for result in results:
+        if result['lead_times']:
+            print(f"\n{result['part_number']}:")
+            print(f"  • Earliest: {result['lead_times'][0]['ship_date']} ({result['lead_times'][0]['qty']:,} units)")
+            print(f"  • Latest:   {result['lead_times'][-1]['ship_date']} ({result['lead_times'][-1]['qty']:,} units)")
+            print(f"  • Total entries: {len(result['lead_times'])}")
+        else:
+            print(f"\n{result['part_number']}: No lead time data")
+    
+    print("\n" + "="*70 + "\n")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,778 @@
+"""
+Digikey Web Scraper for Lead Time Extraction - WORKING VERSION
+Fixed for macOS + Chrome 144.x
+Author: defacto092
+"""
+from selenium.webdriver.common.keys import Keys
+import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium_stealth import stealth
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from bs4 import BeautifulSoup
+import time
+import random
+from datetime import datetime
+from typing import Dict, List, Optional
+import logging
+import re
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+class DigikeyScraperError(Exception):
+    """Custom exception for Digikey scraper errors"""
+    pass
+
+
+class DigikeyLeadTimeScraper:
+    """Production-ready web scraper for Digikey lead time extraction"""
+    
+    SEARCH_URL = "https://www.digikey.de/en/products/result?keywords={}"
+    
+    USER_AGENTS = [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    ]
+    
+    def __init__(self, headless: bool = False, timeout: int = 60):
+        self.headless = headless
+        self.timeout = timeout
+        self.driver = None
+        self.wait = None
+        
+    def setup_driver(self):
+        """Initialize Chrome driver with stealth mode"""
+        try:
+            options = uc.ChromeOptions()
+            
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_argument("--window-size=1920,1080")
+            options.add_argument("--start-maximized")
+            
+            if self.headless:
+                options.add_argument("--headless=new")
+            
+            user_agent = random.choice(self.USER_AGENTS)
+            options.add_argument(f"user-agent={user_agent}")
+            
+            self.driver = uc.Chrome(options=options, version_main=None)
+            self.driver.set_page_load_timeout(120)
+            
+            stealth(
+                self.driver,
+                languages=["de-DE", "de", "en-US", "en"],
+                vendor="Google Inc.",
+                platform="MacIntel",
+                webgl_vendor="Intel Inc.",
+                renderer="Intel Iris OpenGL Engine",
+                fix_hairline=True,
+            )
+            
+            self.wait = WebDriverWait(self.driver, self.timeout)
+            logger.info("✅ Driver initialized")
+            
+        except Exception as e:
+            logger.error(f"❌ Driver init failed: {str(e)}")
+            raise DigikeyScraperError(f"Driver initialization failed: {str(e)}")
+        
+    def accept_cookies(self):
+        """Accept cookies and close privacy banners"""
+        try:
+            logger.info("🍪 Looking for cookie banner...")
+            
+            # Wait a bit for banner to appear
+            time.sleep(2)
+            
+            # Multiple selectors for cookie accept buttons
+            cookie_selectors = [
+                "//button[contains(text(), 'Accept')]",
+                "//button[contains(text(), 'Accept All')]",
+                "//button[contains(text(), 'Akzeptieren')]",  # German
+                "//button[contains(@id, 'accept')]",
+                "//button[contains(@id, 'cookie')]",
+                "//button[contains(@class, 'accept')]",
+                "//a[contains(text(), 'Accept')]",
+                "//*[@id='onetrust-accept-btn-handler']",  # OneTrust
+                "//*[contains(@class, 'cookie-accept')]",
+                "//button[contains(., 'I Accept')]"
+            ]
+            
+            for selector in cookie_selectors:
+                try:
+                    button = WebDriverWait(self.driver, 3).until(
+                        EC.element_to_be_clickable((By.XPATH, selector))
+                    )
+                    button.click()
+                    logger.info("✅ Accepted cookies")
+                    time.sleep(1)
+                    return True
+                except:
+                    continue
+            
+            logger.info("ℹ️ No cookie banner found (or already accepted)")
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Cookie banner handling: {str(e)}")
+            return True  # Continue anyway
+    
+    
+    def human_delay(self, min_sec: float = 2, max_sec: float = 5):
+        """Random delay"""
+        time.sleep(random.uniform(min_sec, max_sec))
+    
+    def scroll_to(self, element):
+        """Scroll to element"""
+        try:
+            self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", element)
+            self.human_delay(0.5, 1.5)
+        except:
+            pass
+    
+    def navigate_to_product(self, part_number: str) -> bool:
+        """Navigate to product page"""
+        try:
+            logger.info(f"🔎 Finding product: {part_number}")
+            self.human_delay(2, 3)
+            
+            page_source = self.driver.page_source.lower()
+            current_url = self.driver.current_url
+            
+            # Check if REALLY on product detail page (not search results)
+            if "/products/detail/" in current_url and part_number.lower() in page_source:
+                logger.info("✅ Already on product detail page")
+                return True
+            
+            logger.info("📋 On search results page, looking for product link...")
+            
+            # Find and click product link
+            try:
+                # Scroll down to see results
+                self.driver.execute_script("window.scrollBy(0, 300);")
+                self.human_delay(1, 2)
+                
+                # Multiple strategies to find the product link
+                link_selectors = [
+                    f"//a[contains(@href, '/products/detail/') and contains(., '{part_number}')]",
+                    f"//td[contains(., '{part_number}')]//ancestor::tr//a[contains(@href, '/products/detail/')]",
+                    "//table[@id='productTable']//a[contains(@href, '/products/detail/')]",
+                    "//table//tr//td[1]//a[contains(@href, '/products/detail/')]"
+                ]
+                
+                product_link = None
+                for selector in link_selectors:
+                    try:
+                        elements = self.driver.find_elements(By.XPATH, selector)
+                        logger.info(f"Found {len(elements)} elements with selector")
+                        
+                        for elem in elements:
+                            try:
+                                elem_text = elem.text.upper()
+                                elem_href = elem.get_attribute('href')
+                                
+                                logger.info(f"Checking element: {elem_text[:30]}")
+                                
+                                if part_number.upper() in elem_text or '/products/detail/' in elem_href:
+                                    product_link = elem
+                                    logger.info(f"✅ Found matching link: {elem_text[:50]}")
+                                    break
+                            except:
+                                continue
+                                
+                        if product_link:
+                            break
+                    except Exception as e:
+                        logger.debug(f"Selector failed: {selector} - {e}")
+                        continue
+                
+                if product_link:
+                    # Scroll to link
+                    self.scroll_to(product_link)
+                    self.human_delay(1, 2)
+                    
+                    # Click using JavaScript for reliability
+                    logger.info(f"Clicking link: {product_link.get_attribute('href')}")
+                    self.driver.execute_script("arguments[0].click();", product_link)
+                    
+                    self.human_delay(5, 7)  # Wait for page to load
+                    logger.info("✅ Clicked product link")
+                    
+                    # Verify we're on detail page
+                    new_url = self.driver.current_url
+                    if "/products/detail/" in new_url:
+                        logger.info(f"✅ Successfully navigated to: {new_url}")
+                        return True
+                    else:
+                        logger.warning(f"⚠️ Not on detail page: {new_url}")
+                        return False
+                else:
+                    logger.error("❌ Product link not found in search results")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"❌ Navigation error: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Navigation failed: {str(e)}")
+            return False
+    
+    def check_stock(self) -> Dict[str, any]:
+        """Check stock status"""
+        try:
+            logger.info("📦 Checking stock...")
+            
+            page_text = self.driver.page_source.lower()
+            
+            in_stock = False
+            quantity = 0
+            status_text = ""
+            
+            if "0 in stock" in page_text or "0 - in stock" in page_text:
+                in_stock = False
+                quantity = 0
+                status_text = "Out of Stock (0)"
+                logger.info("📉 OUT OF STOCK (0 units)")
+                
+            elif "out of stock" in page_text or "not available" in page_text:
+                in_stock = False
+                status_text = "Out of Stock"
+                logger.info("📉 OUT OF STOCK")
+                
+            elif "in stock" in page_text:
+                match = re.search(r'(\d+(?:,\d+)*)\s*(?:-\s*)?(?:in stock|available)', page_text, re.IGNORECASE)
+                if match:
+                    quantity = int(match.group(1).replace(',', ''))
+                    
+                    if quantity == 0:
+                        in_stock = False
+                        status_text = "Out of Stock (0)"
+                        logger.info("📉 OUT OF STOCK (0 units found)")
+                    else:
+                        in_stock = True
+                        status_text = f"{quantity} In Stock"
+                        logger.info(f"✅ IN STOCK: {status_text}")
+                else:
+                    in_stock = False
+                    status_text = "Out of Stock"
+                    logger.info("📉 OUT OF STOCK (no quantity)")
+            
+            return {
+                'in_stock': in_stock,
+                'quantity': quantity,
+                'status_text': status_text
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Stock check error: {str(e)}")
+            return {'in_stock': False, 'quantity': 0, 'status_text': 'Unknown'}
+    
+    def click_lead_time(self) -> bool:
+        """Click Check Lead Time button"""
+        try:
+            logger.info("🔎 Looking for Lead Time button...")
+            
+            # Scroll down a bit to see more content
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2);")
+            self.human_delay(1, 2)
+            
+            selectors = [
+                "//*[contains(text(), 'Check Lead Time')]",
+                "//*[contains(text(), 'Lead Time')]",
+                "//button[contains(., 'Lead Time')]",
+                "//a[contains(text(), 'Check Lead Time')]",
+                "//a[contains(@class, 'lead-time')]"
+            ]
+            
+            button = None
+            for selector in selectors:
+                try:
+                    button = self.wait.until(EC.element_to_be_clickable((By.XPATH, selector)))
+                    logger.info(f"✅ Found button")
+                    break
+                except TimeoutException:
+                    continue
+            
+            if button is None:
+                logger.warning("⚠️ Button not found, scrolling more...")
+                for i in range(5):
+                    self.driver.execute_script("window.scrollBy(0, 300);")
+                    self.human_delay(0.5, 1)
+                
+                for selector in selectors:
+                    try:
+                        button = self.driver.find_element(By.XPATH, selector)
+                        break
+                    except NoSuchElementException:
+                        continue
+                
+                if button is None:
+                    logger.warning("⚠️ Button still not found")
+                    return False
+            
+            self.scroll_to(button)
+            self.human_delay(1, 2)
+            
+            # Try clicking multiple ways
+            try:
+                button.click()
+            except:
+                self.driver.execute_script("arguments[0].click();", button)
+            
+            logger.info("✅ Clicked Lead Time button")
+            
+            self.human_delay(3, 5)
+            return True
+    
+        except Exception as e:
+            logger.error(f"❌ Button click error: {str(e)}")
+            return False
+        
+    def enter_quantity(self, quantity: int = 9999999) -> bool:
+        """Enter quantity"""
+        try:
+            logger.info(f"📝 Entering: {quantity:,}")
+            
+            # Wait for modal to fully load
+            logger.info("⏳ Waiting for modal to appear...")
+            self.human_delay(7, 10)
+            
+            # EXACT selector from HTML!
+            selectors = [
+                '//input[@data-testid="lt-input-qty"]',  # ← EXACT!
+                '//input[@inputmode="numeric"]',
+                '//input[@id="quantity-input"]',
+                '//input[contains(@class, "MuiInputBase-input")]',
+            ]
+            
+            input_field = None
+            for selector in selectors:
+                try:
+                    input_field = WebDriverWait(self.driver, 10).until(
+                        EC.presence_of_element_located((By.XPATH, selector))
+                    )
+                    logger.info(f"✅ Found input with: {selector}")
+                    break
+                except TimeoutException:
+                    logger.debug(f"Selector failed: {selector}")
+                    continue
+            
+            if input_field is None:
+                logger.error("❌ Could not find input field")
+                return False
+            
+            # Wait for visibility
+            try:
+                WebDriverWait(self.driver, 5).until(EC.visibility_of(input_field))
+                logger.info("✅ Input is visible")
+            except:
+                logger.warning("⚠️ Input may not be visible")
+            
+            # Log current value
+            current = input_field.get_attribute('value')
+            logger.info(f"Current value before input: '{current}'")
+            
+            logger.info("🔤 Using character-by-character typing...")
+            
+            try:
+                # Focus
+                input_field.click()
+                self.human_delay(0.5, 1)
+                
+                # Select all and delete (Ctrl+A, Backspace)
+                input_field.send_keys(Keys.CONTROL + 'a')
+                self.human_delay(0.2, 0.3)
+                input_field.send_keys(Keys.BACKSPACE)
+                self.human_delay(0.5, 1)
+                
+                logger.info("✅ Cleared field")
+                
+                # Type character by character
+                qty_str = str(quantity)
+                logger.info(f"Typing: {qty_str}")
+                
+                for i, char in enumerate(qty_str):
+                    input_field.send_keys(char)
+                    time.sleep(0.08)  # Slight delay between chars
+                    if (i + 1) % 3 == 0:  # Log progress every 3 chars
+                        logger.info(f"Typed {i+1}/{len(qty_str)} characters...")
+                
+                logger.info(f"✅ Finished typing all {len(qty_str)} characters")
+                
+                self.human_delay(1, 2)
+                
+                # Press Tab to trigger blur/validation
+                input_field.send_keys(Keys.TAB)
+                logger.info("✅ Pressed TAB to validate")
+                
+                self.human_delay(1, 2)
+                
+                # Verify
+                final_value = input_field.get_attribute('value')
+                logger.info(f"Final value in field: '{final_value}'")
+                
+                # Remove commas for comparison
+                final_clean = final_value.replace(',', '').replace(' ', '')
+                expected = str(quantity)
+                
+                if final_clean == expected or expected in final_clean:
+                    logger.info(f"✅ Successfully entered: {final_value}")
+                    return True
+                else:
+                    logger.error(f"❌ Value mismatch. Expected: {expected}, Got: {final_clean}")
+                    
+                    # Screenshot for debug
+                    try:
+                        screenshot_path = f"/tmp/qty_mismatch_{int(time.time())}.png"
+                        self.driver.save_screenshot(screenshot_path)
+                        logger.info(f"📸 Screenshot: {screenshot_path}")
+                    except:
+                        pass
+                    
+                    return False
+                
+            except Exception as e:
+                logger.error(f"❌ Typing failed: {e}")
+                
+                try:
+                    screenshot_path = f"/tmp/typing_error_{int(time.time())}.png"
+                    self.driver.save_screenshot(screenshot_path)
+                    logger.info(f"📸 Screenshot: {screenshot_path}")
+                except:
+                    pass
+                
+                return False
+            
+        except Exception as e:
+            logger.error(f"❌ Input error: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+
+    
+    def click_update_button(self) -> bool:
+        """Click Update button in lead time modal"""
+        try:
+            logger.info("🔘 Looking for Update button...")
+            
+            update_selectors = [
+                "//button[contains(text(), 'Update')]",
+                "//button[text()='Update']",
+                "//button[@type='button' and contains(., 'Update')]",
+            ]
+            
+            button = None
+            for selector in update_selectors:
+                try:
+                    button = WebDriverWait(self.driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, selector))
+                    )
+                    logger.info("✅ Found Update button")
+                    break
+                except TimeoutException:
+                    continue
+            
+            if button is None:
+                logger.warning("⚠️ Update button not found")
+                return False
+            
+            self.scroll_to(button)
+            self.human_delay(0.5, 1)
+            
+            # Click button
+            try:
+                button.click()
+            except:
+                self.driver.execute_script("arguments[0].click();", button)
+            
+            logger.info("✅ Clicked Update button")
+            
+            # Wait for table to load
+            self.human_delay(5, 8)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Update button error: {str(e)}")
+            return False
+    
+    def extract_table(self) -> List[Dict[str, any]]:
+        """Extract lead time table"""
+        try:
+            logger.info("📊 Extracting table...")
+            
+            try:
+                self.wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "table")))
+            except TimeoutException:
+                logger.warning("⚠️ No tables found")
+                return []
+            
+            self.human_delay(2, 3)
+            
+            lead_time_data = []
+            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+            tables = soup.find_all('table')
+            
+            logger.info(f"Found {len(tables)} tables")
+            
+            for table_idx, table in enumerate(tables):
+                try:
+                    rows = table.find_all('tr')
+                    
+                    if len(rows) < 2:
+                        continue
+                    
+                    logger.info(f"Processing table {table_idx} with {len(rows)} rows")
+                    
+                    for row_idx, row in enumerate(rows[1:]):
+                        cells = row.find_all(['td', 'th'])
+                        
+                        if len(cells) >= 2:
+                            try:
+                                qty_text = cells[0].get_text().strip()
+                                qty = int(re.sub(r'[^\d]', '', qty_text))
+                                
+                                date_text = cells[1].get_text().strip()
+                                ship_date = self.parse_date(date_text)
+                                
+                                if qty > 0 and ship_date:
+                                    lead_time_data.append({
+                                        'qty': qty,
+                                        'ship_date': ship_date,
+                                        'raw_text': f"QTY: {qty}, Date: {date_text}"
+                                    })
+                                    logger.info(f"✅ Found: {qty:,} on {ship_date}")
+                                    
+                            except (ValueError, IndexError, AttributeError) as e:
+                                logger.debug(f"Row parse error: {str(e)}")
+                                continue
+                    
+                    if lead_time_data:
+                        break
+                        
+                except Exception as e:
+                    logger.debug(f"Table error: {str(e)}")
+                    continue
+            
+            if not lead_time_data:
+                logger.warning("⚠️ No data extracted")
+            else:
+                logger.info(f"✅ Extracted {len(lead_time_data)} entries")
+            
+            return lead_time_data
+            
+        except Exception as e:
+            logger.error(f"❌ Extraction error: {str(e)}")
+            return []
+    
+    def parse_date(self, date_str: str) -> Optional[str]:
+        """Parse date"""
+        if not date_str:
+            return None
+        
+        date_str = date_str.strip()
+        
+        formats = [
+            "%d.%m.%Y",
+            "%m/%d/%Y",
+            "%d/%m/%Y",
+            "%Y-%m-%d",
+            "%d-%m-%Y",
+            "%B %d, %Y",
+            "%d %B %Y",
+        ]
+        
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(date_str, fmt)
+                return parsed.strftime("%d.%m.%Y")
+            except ValueError:
+                continue
+        
+        return None
+    
+    def search_part(self, part_number: str) -> bool:
+        """Search for part number"""
+        try:
+            logger.info(f"🔍 Searching: {part_number}")
+            
+            url = self.SEARCH_URL.format(part_number)
+            logger.info(f"📍 URL: {url}")
+            
+            for attempt in range(3):
+                try:
+                    self.driver.get(url)
+                    break
+                except TimeoutException:
+                    logger.warning(f"⚠️ Timeout attempt {attempt + 1}/3")
+                    if attempt < 2:
+                        time.sleep(5)
+                    else:
+                        return False
+            
+            self.human_delay(3, 5)
+            
+            # IMPORTANT: Accept cookies first!
+            self.accept_cookies()
+            
+            self.human_delay(2, 3)
+            
+            logger.info(f"📄 Page: {self.driver.title}")
+            
+            try:
+                self.wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                
+                page_source = self.driver.page_source.lower()
+                if "404" in self.driver.title or "not found" in page_source:
+                    logger.error("❌ 404 page")
+                    return False
+                
+                logger.info("✅ Page loaded")
+                return True
+                
+            except TimeoutException:
+                logger.warning("⚠️ Timeout")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Search error: {str(e)}")
+            return False
+
+    
+    def scrape_part(self, part_number: str) -> Dict[str, any]:
+        """Main scraping workflow"""
+        result = {
+            'part_number': part_number,
+            'success': False,
+            'in_stock': False,
+            'current_quantity': 0,
+            'lead_times': [],
+            'error': None,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        try:
+            if not self.search_part(part_number):
+                result['error'] = "Part not found"
+                return result
+            
+            self.navigate_to_product(part_number)
+            
+            stock = self.check_stock()
+            result['in_stock'] = stock['in_stock']
+            result['current_quantity'] = stock['quantity']
+            
+            if stock['in_stock']:
+                result['success'] = True
+                logger.info(f"✅ {part_number}: In stock")
+                return result
+            
+            if not self.click_lead_time():
+                result['error'] = "Could not click lead time"
+                return result
+            
+            if not self.enter_quantity():
+                result['error'] = "Could not enter quantity"
+                return result
+            
+            if not self.click_update_button():
+                result['error'] = "Could not click Update button"
+                return result
+
+            
+            lead_times = self.extract_table()
+            result['lead_times'] = lead_times
+            result['success'] = True if lead_times else False
+            
+            if lead_times:
+                logger.info(f"✅ Successfully scraped {part_number}")
+            else:
+                result['error'] = "No lead time data"
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Scrape error: {str(e)}")
+            result['error'] = str(e)
+            return result
+    
+    def close(self):
+        """Close driver"""
+        if self.driver:
+            try:
+                self.driver.quit()
+                logger.info("✅ Driver closed")
+            except:
+                pass
+    
+    def print_results(self, result: Dict[str, any]):
+        """Print results"""
+        print("\n" + "="*70)
+        print(f"PART NUMBER: {result['part_number']}")
+        print("="*70)
+        print(f"Status: {'✅ SUCCESS' if result['success'] else '❌ FAILED'}")
+        print(f"Timestamp: {result['timestamp']}")
+        print(f"In Stock: {'Yes' if result['in_stock'] else 'No'}")
+        print(f"Current Quantity: {result['current_quantity']:,}")
+        
+        if result['error']:
+            print(f"Error: {result['error']}")
+        
+        if result['lead_times']:
+            print("\nLead Time Schedule:")
+            print("-" * 70)
+            print(f"{'QTY':<15} | {'Ship Date':<20}")
+            print("-" * 70)
+            for entry in result['lead_times']:
+                print(f"{entry['qty']:<15,} | {entry['ship_date']:<20}")
+        
+        print("="*70 + "\n")
+
+
+def main():
+    """Main execution"""
+    
+    test_parts = [
+        "AD5412AREZ",
+        "ADXL355BEZ",
+        "CLA4603-085LF"
+    ]
+    
+    print("\n🚀 Starting Digikey Lead Time Scraper")
+    print(f"📅 Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    for part_number in test_parts:
+        scraper = None
+        try:
+            scraper = DigikeyLeadTimeScraper(headless=False, timeout=60)
+            scraper.setup_driver()
+            result = scraper.scrape_part(part_number)
+            scraper.print_results(result)
+            
+            if test_parts.index(part_number) < len(test_parts) - 1:
+                delay = random.uniform(10, 20)
+                logger.info(f"⏳ Waiting {delay:.1f}s...")
+                time.sleep(delay)
+                
+        except DigikeyScraperError as e:
+            logger.error(f"❌ Scraper error: {str(e)}")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error: {str(e)}")
+        finally:
+            if scraper:
+                scraper.close()
+    
+    print(f"✅ Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,9 @@
+beautifulsoup4>=4.12.0
+playwright>=1.40.0
+requests>=2.31.0
+
+# Optional: Digi-Key API (recommended for production)
+digikey-api>=0.4.0
+
+# Optional: Web scraping with proxies
+python-dotenv>=1.0.0

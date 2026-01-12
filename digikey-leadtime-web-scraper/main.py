@@ -796,21 +796,23 @@ def main():
     
     print("="*70 + "\n")
     
-    # ✅ LEAD TIMES SUMMARY
+    # ✅ LEAD TIMES SUMMARY - ALL ENTRIES
     print("📦 LEAD TIME SUMMARY")
     print("="*70)
     
     for result in results:
         if result['lead_times']:
             print(f"\n{result['part_number']}:")
-            print(f"  • Earliest: {result['lead_times'][0]['ship_date']} ({result['lead_times'][0]['qty']:,} units)")
-            print(f"  • Latest:   {result['lead_times'][-1]['ship_date']} ({result['lead_times'][-1]['qty']:,} units)")
-            print(f"  • Total entries: {len(result['lead_times'])}")
+            print(f"  Total entries: {len(result['lead_times'])}")
+            print(f"  {'#':<3} | {'QTY':<15} | {'Ship Date':<12}")
+            print(f"  {'-'*3}-+-{'-'*15}-+-{'-'*12}")
+            
+            for idx, entry in enumerate(result['lead_times'], start=1):
+                print(f"  {idx:<3} | {entry['qty']:<15,} | {entry['ship_date']:<12}")
         else:
             print(f"\n{result['part_number']}: No lead time data")
     
     print("\n" + "="*70 + "\n")
-
 
 
 if __name__ == "__main__":
